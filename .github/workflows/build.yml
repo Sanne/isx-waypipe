@@ -1,0 +1,80 @@
+name: build
+
+# Builds the three binaries on every pull request and push to main, and publishes them with their
+# sums and sources when a tag v<waypipe version>-isx.<n> is pushed.
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the static binary in the pinned Alpine
+        run: ./build-linux-in-alpine.sh out
+      - name: Show a window's worth of Wayland through it, both ends
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq weston wayland-utils
+          ./test-linux.sh out/waypipe-*-linux-*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-${{ matrix.runner }}
+          path: out/waypipe-*
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install what the build needs
+        run: brew install bindgen pkgconf lz4 zstd
+      - name: Build the macOS binary
+        run: ./build-macos.sh out
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: macos
+          path: out/waypipe-*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: out
+          merge-multiple: true
+      - name: Publish the binaries, their sources and their sums
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          . ./pins.env
+          case "$TAG" in
+            "v$WAYPIPE_VERSION-isx."*) ;;
+            *) echo "ERROR: tag $TAG is not v$WAYPIPE_VERSION-isx.<n>, the version pins.env builds" >&2; exit 1 ;;
+          esac
+          ./source-archives.sh out
+          cp LICENSE out/LICENSE
+          cd out
+          ls waypipe-"$WAYPIPE_VERSION"-linux-x86_64 waypipe-"$WAYPIPE_VERSION"-linux-aarch64 waypipe-"$WAYPIPE_VERSION"-macos-aarch64
+          sha256sum waypipe-* > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$TAG" --title "waypipe $WAYPIPE_VERSION for isx" \
+            --notes "waypipe $WAYPIPE_VERSION, built for isx from the commits in pins.env. Each binary's source is attached. GPL-3.0-or-later." \
+            waypipe-* SHA256SUMS LICENSE
